@@ -12,15 +12,27 @@ permissions:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
+    container:
+      image: ubuntu:20.04
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install libpcap development headers
+      - name: Install build dependencies in Ubuntu 20.04
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libpcap-dev
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            libpcap-dev \
+            ca-certificates \
+            curl \
+            git \
+            gcc \
+            libc6-dev \
+            tar \
+            gzip \
+            tzdata
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -36,46 +48,34 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "date=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S CST')" >> "$GITHUB_OUTPUT"
 
-      - name: Build binaries
+      - name: Build binary for Linux amd64
         env:
           CGO_ENABLED: 1
+          GOOS: linux
+          GOARCH: amd64
         run: |
           mkdir -p dist
           BINARY_NAME="cctvscan"
           PKG_PATH="./cmd/cctvscan"
           VERSION="${{ steps.version.outputs.tag }}"
+          OUT_BIN="dist/${BINARY_NAME}-${GOOS}-${GOARCH}"
 
-          # 启用 cgo 链接 libpcap 时，当前 Runner 默认构建 Linux amd64
-          TARGETS=(
-            "linux/amd64"
-          )
+          go build \
+            -trimpath \
+            -ldflags="-s -w -X main.version=${VERSION}" \
+            -o "$OUT_BIN" \
+            "$PKG_PATH"
 
-          for target in "${TARGETS[@]}"; do
-            GOOS="${target%/*}"
-            GOARCH="${target#*/}"
-            EXT=""
-            if [ "$GOOS" = "windows" ]; then
-              EXT=".exe"
-            fi
+          STAGE_DIR="dist/stage_${GOOS}_${GOARCH}"
+          mkdir -p "$STAGE_DIR"
+          cp "$OUT_BIN" "$STAGE_DIR/${BINARY_NAME}"
+          [ -f README.md ] && cp README.md "$STAGE_DIR/"
+          [ -f LICENSE ] && cp LICENSE "$STAGE_DIR/"
+          [ -f USAGE.md ] && cp USAGE.md "$STAGE_DIR/"
 
-            OUT_BIN="dist/${BINARY_NAME}-${GOOS}-${GOARCH}${EXT}"
-            echo "Building ${OUT_BIN}..."
-            GOOS="$GOOS" GOARCH="$GOARCH" go build \
-              -trimpath \
-              -ldflags="-s -w -X main.version=${VERSION}" \
-              -o "$OUT_BIN" \
-              "$PKG_PATH"
-
-            STAGE_DIR="dist/stage_${GOOS}_${GOARCH}"
-            mkdir -p "$STAGE_DIR"
-            cp "$OUT_BIN" "$STAGE_DIR/${BINARY_NAME}${EXT}"
-            [ -f README.md ] && cp README.md "$STAGE_DIR/"
-            [ -f LICENSE ] && cp LICENSE "$STAGE_DIR/"
-
-            ARCHIVE_BASE="${BINARY_NAME}_${VERSION}_${GOOS}_${GOARCH}"
-            tar -czf "dist/${ARCHIVE_BASE}.tar.gz" -C "$STAGE_DIR" .
-            rm -rf "$STAGE_DIR" "$OUT_BIN"
-          done
+          ARCHIVE_BASE="${BINARY_NAME}_${VERSION}_${GOOS}_${GOARCH}"
+          tar -czf "dist/${ARCHIVE_BASE}.tar.gz" -C "$STAGE_DIR" .
+          rm -rf "$STAGE_DIR" "$OUT_BIN"
 
           (cd dist && sha256sum * > checksums.txt)
 
@@ -86,6 +86,12 @@ jobs:
           name: "cctvscan ${{ steps.version.outputs.tag }} (Pre-release)"
           prerelease: true
           generate_release_notes: true
+          body: |
+            Automated pre-release build for `cctvscan` built on Ubuntu 20.04 (`GLIBC_2.31` baseline).
+
+            - **Version**: `${{ steps.version.outputs.tag }}`
+            - **Build Time**: `${{ steps.version.outputs.date }}`
+            - **Commit**: `${{ github.sha }}`
           files: |
             dist/*.tar.gz
             dist/checksums.txt
