@@ -1,0 +1,105 @@
+name: Build & Publish Pre-release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: # 支持在 GitHub Actions 界面手动触发
+
+permissions:
+  contents: write # 允许创建 Release 和上传附件
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: Generate timestamp version
+        id: version
+        run: |
+          # 使用北京时间 (Asia/Shanghai) 生成版本号，如需 UTC 可改为 TZ='UTC'
+          TS=$(TZ='Asia/Shanghai' date +'%Y.%m.%d-%H%M%S')
+          TAG="v${TS}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "date=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S CST')" >> "$GITHUB_OUTPUT"
+
+      - name: Build binaries
+        env:
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          BINARY_NAME="cctvscan"
+          PKG_PATH="./cmd/cctvscan"
+          VERSION="${{ steps.version.outputs.tag }}"
+
+          # 定义目标平台矩阵：OS/ARCH
+          TARGETS=(
+            "linux/amd64"
+            "linux/arm64"
+            "darwin/amd64"
+            "darwin/arm64"
+            "windows/amd64"
+          )
+
+          for target in "${TARGETS[@]}"; do
+            GOOS="${target%/*}"
+            GOARCH="${target#*/}"
+            EXT=""
+            if [ "$GOOS" = "windows" ]; then
+              EXT=".exe"
+            fi
+
+            OUT_BIN="dist/${BINARY_NAME}-${GOOS}-${GOARCH}${EXT}"
+            echo "Building ${OUT_BIN}..."
+            GOOS="$GOOS" GOARCH="$GOARCH" go build \
+              -trimpath \
+              -ldflags="-s -w -X main.version=${VERSION}" \
+              -o "$OUT_BIN" \
+              "$PKG_PATH"
+
+            # 打包压缩（Windows 用 zip，其余用 tar.gz）
+            STAGE_DIR="dist/stage_${GOOS}_${GOARCH}"
+            mkdir -p "$STAGE_DIR"
+            cp "$OUT_BIN" "$STAGE_DIR/${BINARY_NAME}${EXT}"
+            [ -f README.md ] && cp README.md "$STAGE_DIR/"
+            [ -f LICENSE ] && cp LICENSE "$STAGE_DIR/"
+
+            ARCHIVE_BASE="${BINARY_NAME}_${VERSION}_${GOOS}_${GOARCH}"
+            if [ "$GOOS" = "windows" ]; then
+              (cd "$STAGE_DIR" && zip -q -r "../${ARCHIVE_BASE}.zip" .)
+            else
+              tar -czf "dist/${ARCHIVE_BASE}.tar.gz" -C "$STAGE_DIR" .
+            fi
+
+            rm -rf "$STAGE_DIR" "$OUT_BIN"
+          done
+
+          # 生成 SHA256 校验文件
+          (cd dist && sha256sum * > checksums.txt)
+
+      - name: Create Pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "cctvscan ${{ steps.version.outputs.tag }} (Pre-release)"
+          prerelease: true
+          generate_release_notes: true
+          body: |
+            Automated pre-release build for `cctvscan`.
+
+            - **Version**: `${{ steps.version.outputs.tag }}`
+            - **Build Time**: `${{ steps.version.outputs.date }}`
+            - **Commit**: `${{ github.sha }}`
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
