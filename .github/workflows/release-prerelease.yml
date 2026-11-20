@@ -4,10 +4,10 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch: # 支持在 GitHub Actions 界面手动触发
+  workflow_dispatch:
 
 permissions:
-  contents: write # 允许创建 Release 和上传附件
+  contents: write
 
 jobs:
   build-and-release:
@@ -16,6 +16,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Install libpcap development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpcap-dev
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -26,7 +31,6 @@ jobs:
       - name: Generate timestamp version
         id: version
         run: |
-          # 使用北京时间 (Asia/Shanghai) 生成版本号，如需 UTC 可改为 TZ='UTC'
           TS=$(TZ='Asia/Shanghai' date +'%Y.%m.%d-%H%M%S')
           TAG="v${TS}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
@@ -34,20 +38,16 @@ jobs:
 
       - name: Build binaries
         env:
-          CGO_ENABLED: 0
+          CGO_ENABLED: 1
         run: |
           mkdir -p dist
           BINARY_NAME="cctvscan"
           PKG_PATH="./cmd/cctvscan"
           VERSION="${{ steps.version.outputs.tag }}"
 
-          # 定义目标平台矩阵：OS/ARCH
+          # 启用 cgo 链接 libpcap 时，当前 Runner 默认构建 Linux amd64
           TARGETS=(
             "linux/amd64"
-            "linux/arm64"
-            "darwin/amd64"
-            "darwin/arm64"
-            "windows/amd64"
           )
 
           for target in "${TARGETS[@]}"; do
@@ -66,7 +66,6 @@ jobs:
               -o "$OUT_BIN" \
               "$PKG_PATH"
 
-            # 打包压缩（Windows 用 zip，其余用 tar.gz）
             STAGE_DIR="dist/stage_${GOOS}_${GOARCH}"
             mkdir -p "$STAGE_DIR"
             cp "$OUT_BIN" "$STAGE_DIR/${BINARY_NAME}${EXT}"
@@ -74,16 +73,10 @@ jobs:
             [ -f LICENSE ] && cp LICENSE "$STAGE_DIR/"
 
             ARCHIVE_BASE="${BINARY_NAME}_${VERSION}_${GOOS}_${GOARCH}"
-            if [ "$GOOS" = "windows" ]; then
-              (cd "$STAGE_DIR" && zip -q -r "../${ARCHIVE_BASE}.zip" .)
-            else
-              tar -czf "dist/${ARCHIVE_BASE}.tar.gz" -C "$STAGE_DIR" .
-            fi
-
+            tar -czf "dist/${ARCHIVE_BASE}.tar.gz" -C "$STAGE_DIR" .
             rm -rf "$STAGE_DIR" "$OUT_BIN"
           done
 
-          # 生成 SHA256 校验文件
           (cd dist && sha256sum * > checksums.txt)
 
       - name: Create Pre-release
@@ -93,13 +86,6 @@ jobs:
           name: "cctvscan ${{ steps.version.outputs.tag }} (Pre-release)"
           prerelease: true
           generate_release_notes: true
-          body: |
-            Automated pre-release build for `cctvscan`.
-
-            - **Version**: `${{ steps.version.outputs.tag }}`
-            - **Build Time**: `${{ steps.version.outputs.date }}`
-            - **Commit**: `${{ github.sha }}`
           files: |
             dist/*.tar.gz
-            dist/*.zip
             dist/checksums.txt
